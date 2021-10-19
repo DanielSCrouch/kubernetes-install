@@ -1,9 +1,123 @@
 #!/bin/bash
 
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+######################################################################
+# Option parsing
+######################################################################
+
+# Set defaults
+
 CURRENT_USER=$(logname)
-CLUSTER_NAME="factory1"
-MASTER_WORKER_NODE=$1
-CONTROLLER_IP=$2
+CLUSTER_NAME="k8cluster"
+NODE_TYPE="master"
+MASTER_IP_ADDRESS=""
+CLUSTER_TOKEN="g1utv3.j0ehzl2roqi1yaok"
+
+# Usage/help output
+
+options::usage() {
+    echo ""
+    echo -e "Available options:"
+    echo -e "${CYAN}Deploy as master node: ${NC}"
+    echo -e "sudo ./install.sh --node master --cluster-name cluster1 --token g1utv3.j0ehzl2roqi1yaok"
+    echo -e "sudo ./install.sh -n master -c cluster1 -t g1utv3.j0ehzl2roqi1yaok"
+    echo ""
+    echo -e "${CYAN}Deploy as worker node to existing cluster: ${NC}"
+    echo -e "sudo ./install.sh --node worker --address-master 10.40.1.10 --token g1utv3.j0ehzl2roqi1yaok"
+    echo -e "sudo ./install.sh -n worker -a 10.40.1.10 -t g1utv3.j0ehzl2roqi1yaok"
+    echo ""
+}
+
+# Parse options
+
+options::parse() {
+  
+  POSITIONAL=()
+  while [[ $# -gt 0 ]]; do
+    key="$1"
+
+    case $key in
+      # node type (master or worker)
+      -n|--node) 
+        NODE_TYPE="$2"
+        shift # past argument
+        shift # past value
+        ;;
+      # cluster name
+      -c|--cluster-name) 
+        CLUSTER_NAME="$2"
+        shift # past argument
+        shift # past value
+        ;;
+      # master ip-address
+      -a|--address-master)
+        MASTER_IP_ADDRESS="$2"
+        shift # past argument
+        shift # past value
+        ;;
+      # cluster token
+      -t|--token)
+        CLUSTER_TOKEN="$2"
+        shift # past argument
+        shift # past value
+        ;;
+      # help/usage
+      -h|--help)
+        options::usage
+        exit 0
+        ;;
+      # default
+      --default)
+        DEFAULT=YES
+        shift # past argument
+        ;;
+      *)    # unknown option
+        POSITIONAL+=("$1") # save it in an array for later
+        shift # past argument
+        ;;
+    esac
+  done
+
+  set -- "${POSITIONAL[@]}" # restore positional parameters
+
+  if [[ -n $1 ]]; then
+      echo "Last line of file specified as non-opt/last argument:"
+      tail -1 "$1"
+  fi
+}
+
+# Validate input options
+
+options::validate() {
+  if [[ $CLUSTER_TOKEN == "" ]]; then
+    echo "[ERROR] Cluster-join token set to empty, see --help"
+    exit 1
+  fi
+
+  if [[ $NODE_TYPE != "master" && $NODE_TYPE != "worker" ]]; then
+    echo "[ERROR] Node type must be 'master' or 'worker' only, not '${NODE_TYPE}', see --help"
+    exit 1
+  fi
+
+  if [[ $NODE_TYPE == "master" && $CLUSTER_NAME == "" ]]; then
+    echo "[ERROR] Cluster name not set, see --help"
+    exit 1
+  fi
+
+  if [[ $NODE_TYPE == "master" && $MASTER_IP_ADDRESS != "" ]]; then
+    echo "[ERROR] Single master deployment only, cannot set master IP address when deploying master node"
+    exit 1
+  fi
+}
+
+######################################################################
+# Install Docker
+######################################################################
 
 requirements::install_docker(){
 
@@ -99,6 +213,10 @@ EOF
         exit 1
     fi
 }
+
+######################################################################
+# Install Kubernetes
+######################################################################
 
 requirements::install_kubernetes(){
     # Update apt
@@ -269,12 +387,12 @@ kind: ClusterConfiguration
 networking:
     podSubnet: 10.244.0.0/16 # --pod-network-cidr
     serviceSubnet: "172.16.0.0/12"
-clusterName: $CLUSTER_NAME
+clusterName: ${CLUSTER_NAME}
 ---
 apiversion: kubeadm.k8s.io/v1beta2
 kind: InitConfiguration
 bootstrapTokens:
-  - token: g1utv3.j0ehzl2roqi1yaok
+  - token: ${CLUSTER_TOKEN}
     description: "kubeadm boostrap token"
     ttl: "24h"
     usages:
@@ -290,10 +408,19 @@ EOF
 # MAIN
 #################################################
 
+options::parse "$@"
+options::validate
+
 if [[ $EUID -ne 0 ]]; then
    echo "[ERROR] This script must be run as root"
    exit 1
 fi
+
+echo -e "CLUSTER NAME: \t ${CLUSTER_NAME}"
+echo -e "NODE TYPE: \t ${NODE_TYPE}"
+echo -e "MASTER IP: \t ${MASTER_IP_ADDRESS}"
+echo -e "CLUSTER TOKEN: \t ${CLUSTER_TOKEN}"
+echo "-------------------------------------------------------------------------"
 
 # Install docker if it is not already installed
 if ! command -v ctr &> /dev/null
@@ -301,30 +428,21 @@ then
     echo "[Docker-Install] Installing docker"
     requirements::install_docker
 else
-    echo "[WARN] Docker is already installed, skipping installation"
+    echo "[INFO] Docker is already installed, skipping installation"
 fi
 
 # Install kubernetes if it is not already installed
 if ! command -v kubectl &> /dev/null
 then
-    echo "[Docker-Install] Installing kubernetes components"
+    echo "[Kubernetes-Install] Installing kubernetes components"
     requirements::install_kubernetes
 else
-    echo "[WARN] Kubernetes is already installed, skipping installation..."
+    echo "[INFO] Kubernetes is already installed, skipping installation..."
 fi
 
-# Install kubernetes if it is not already installed
-if ! command -v kubectl &> /dev/null
-then
-    echo "[Docker-Install] Installing kubernetes components"
-    requirements::install_kubernetes
-else
-    echo "[WARN] Kubernetes is already installed, skipping installation..."
-fi
-
-# Configure kubernetes as controller node 
-if [[ $1 == "-m" ]]; then
-    echo "[Kubernetes-Initialise] Initialising controller node"
+# Configure kubernetes as master node 
+if [[ $NODE_TYPE == "master" ]]; then
+    echo "[Kubernetes-Initialise] Initialising master node"
     sudo kubeadm init --config=/etc/containerd/kubeadm_config.yaml --ignore-preflight-errors="NumCPU"
 
     echo "[Kubernetes-Initialise] Setting kubeconfig cluster authentication file"
@@ -341,12 +459,10 @@ if [[ $1 == "-m" ]]; then
 fi
 
 # Configure kubernetes as worker node 
-if [[ $1 == "-w" ]]; then
-    CONTROLLER_IP=$2
-    echo "[Kubernetes-Initialise] Initialising worker node with controller IP $CONTROLLER_IP"
-    sudo kubeadm join $CONTROLLER_IP:6443 --token g1utv3.j0ehzl2roqi1yaok --discovery-token-unsafe-skip-ca-verification
+if [[ $NODE_TYPE == "worker" ]]; then
+    echo "[Kubernetes-Initialise] Initialising worker node with master IP $MASTER_IP_ADDRESS"
+    sudo kubeadm join $MASTER_IP_ADDRESS:6443 --token $CLUSTER_TOKEN --discovery-token-unsafe-skip-ca-verification
 fi
-
 
 # https://kubernetes.io/docs/reference/setup-tools/kubeadm/implementation-details/ 
 # https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta2/

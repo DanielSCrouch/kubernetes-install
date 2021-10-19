@@ -94,6 +94,11 @@ options::parse() {
 # Validate input options
 
 options::validate() {
+  if [[ $CURRENT_USER == "" ]]; then
+    echo "[ERROR] Current user set to empty, see --help"
+    exit 1
+  fi
+
   if [[ $CLUSTER_TOKEN == "" ]]; then
     echo "[ERROR] Cluster-join token set to empty, see --help"
     exit 1
@@ -446,7 +451,6 @@ if [[ $NODE_TYPE == "master" ]]; then
     sudo kubeadm init --config=/etc/containerd/kubeadm_config.yaml --ignore-preflight-errors="NumCPU"
 
     echo "[Kubernetes-Initialise] Setting kubeconfig cluster authentication file"
-    CURRENT_USER=$(logname)
     mkdir -p /home/$CURRENT_USER/.kube
     sudo cp -i /etc/kubernetes/admin.conf /home/$CURRENT_USER/.kube/config
     sudo chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/.kube/config
